@@ -8,6 +8,7 @@
 
 static volatile unsigned int *clk_mem, *pwm_mem, *gpio_mem;
 
+static float frequency = 1000.0, dutycycle = 50.0;
 /* 
 * ===  FUNCTION  =============================================================
 *         Name:  pwm_enable(int pin, bool enable)
@@ -33,7 +34,7 @@ int pwm_enable(int pin, _Bool enable)
 * ===  FUNCTION  =============================================================
 *         Name:  setMode(int pin, int mode)
 *  Description:  set pin to MSMODE(normal) or PWMMODE(distributed)
-* ============================================================================
+*g ============================================================================
 */
 int setMode(int pin, int mode)
 {
@@ -45,7 +46,7 @@ int setMode(int pin, int mode)
     } else if(pin > 1) {
         return ERRMODE;
     } else {
-        shift = 7 + pin*8;
+        shift = MSSHIFT + pin*8;
         reg = *(pwm_mem + PWM_CTL);
         reg &= ~(1 << shift);
         reg |= (mode << shift);
@@ -108,7 +109,7 @@ volatile unsigned int *mapRegAddr(unsigned int baseAddr)
     if(close(mem_fd) < 0) {
         perror("close /dev/mem");
         exit(1);
-    }	
+    }
 
     if (regAddrMap == MAP_FAILED) {
         perror("mmap error");
@@ -159,7 +160,7 @@ int configPWMPin(int gpio)
 int setClock(_Bool init)
 {
     int divisor = 75;
-	int counts = 0;
+    int counts = 0;
 
     /* stop clock and waiting for busy flag doesn't work,
      * so kill clock  first. '5A' is CLK password */
@@ -178,15 +179,13 @@ int setClock(_Bool init)
     if(init) {
         *(pwm_mem + PWM_CTL) = 0;
         usleep(10); /* prevent from PWM module crashes */
-
-        counts = 19200000.0/75.0/1000.0; /* default set to 1000Hz */
+        counts = 19200000.0/75.0/frequency; /* default set to 1000Hz */
         *(pwm_mem + PWM_RNG1) = counts;
         *(pwm_mem + PWM_RNG2) = counts;
         usleep(10);
 
-        *(pwm_mem + PWM_DAT1) = counts / 2; /* default duty cycle to 50% */
-        *(pwm_mem + PWM_DAT2) = counts / 2;
-        usleep(10); /* prevent from PWM module crashes */
+        *(pwm_mem + PWM_DAT1) = counts * dutycycle/100.0; /* default duty cycle to 50% */
+        *(pwm_mem + PWM_DAT2) = counts * dutycycle/100.0;
     }
 
     return 0;
@@ -198,27 +197,27 @@ int setClock(_Bool init)
 *  Description:  set PWM pin frequency between 0.1Hz and 19.2MHz
 * ============================================================================
 */
-int setFrequency(int pin, float frequency)
+int setFrequency(int pin, float freq)
 {
     int counts, bits;
 
     /* make sure the frequency is valid */
-    if (frequency < 0 || frequency > 19200000.0f)
+    if (freq< 0 || freq> 19200000.0f)
         return ERRFREQ;
 
-    setClock(0);
+    counts = 19200000.0/75.0/freq;
+    bits = counts * dutycycle/100.0;
     if (pin == 0) {
-        bits = *(pwm_mem + PWM_DAT1);
-        counts = (int)(frequency / (1.0*bits));
         *(pwm_mem + PWM_RNG1) = counts;
-    } else if (pin == 2) {
-        bits = *(pwm_mem + PWM_DAT2);
-        counts = (int)(frequency / (1.0*bits));
+        *(pwm_mem + PWM_DAT1) = bits;
+    } else if (pin == 1) {
         *(pwm_mem + PWM_RNG2) = counts;
+        *(pwm_mem + PWM_DAT2) = bits;
     } else {
         return ERRFREQ;
     }
 
+    frequency = freq;
     usleep(10);
     return 0;
 }
@@ -229,27 +228,25 @@ int setFrequency(int pin, float frequency)
 *  Description:  set duty cycle from 0% to 100%
 * ============================================================================
 */
-int setDutyCycle(int pin, float dutycycle)
+int setDutyCycle(int pin, float duty)
 {
     int counts, bits;
 
-    if((dutycycle < 0 || dutycycle > 100.0))
+    if((duty< 0 || duty> 100.0))
         return ERRDUTY;
 
-    setClock(0);
-
+    counts = 19200000.0/75.0/frequency;
+    bits = counts * duty/100.0;
     if (pin == 0) {
-        counts = *(pwm_mem + PWM_RNG1);
-        bits = dutycycle/100.0 * counts;
+        *(pwm_mem + PWM_RNG1) = counts;
         *(pwm_mem + PWM_DAT1) = bits;
     } else if (pin == 1) {
-        counts = *(pwm_mem + PWM_RNG2);
-        bits = dutycycle/100.0 * counts;
+        *(pwm_mem + PWM_RNG2) = counts;
         *(pwm_mem + PWM_DAT2) = bits;
     } else {
         return ERRDUTY;
     }
-
+    dutycycle = duty;
     usleep(10);
     return 0;
 }
@@ -284,6 +281,7 @@ void pwm_stop()
 
     /* source=osc and enable clock */
     *(clk_mem + PWMCLK_CNTL) = BCM_PASSWD | (1<<CLK_ENABLE) | (1<<CLK_OSC);
+    usleep(10);
 
     if(munmap((void*)clk_mem, BLOCK_SIZE) < 0){
         perror("munmap (clk)");
@@ -316,7 +314,6 @@ void pwm_init()
     configPWMPin(18); //configure GPIO18 to ALT5 (PWM output)
     configPWMPin(19); //configure GPIO19 to ALT5 (PWM output)
 
-    setClock(1);
     setClock(1);
     setMode(0, MSMODE);
     setMode(1, MSMODE);
