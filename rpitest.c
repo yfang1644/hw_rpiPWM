@@ -1,22 +1,14 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include "rpiPWM.h"
+#include "rpiI2C.h"
 
 int main (int argc, char *argv[])
 {
     int d;
-    pwm_init();
+    i2c_init(1500);
 
-    pwm_enable(0, 1);
-    setFrequency(0, 10.0);
+    i2c_write(0x40, 100);
 
-    for(d = 1; d < 90; d+=1) {
-        setDutyCycle(0, (float)d);
-        usleep(200000);
-    }
-
-    pwm_enable(0, 0);
-    pwm_stop();
     return 0;
 }

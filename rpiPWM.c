@@ -4,23 +4,25 @@
 #include <sys/mman.h>
 #include <fcntl.h>
 
+#include "rpiGPIO.h"
 #include "rpiPWM.h"
 
-static volatile unsigned int *clk_mem, *pwm_mem, *gpio_mem;
+volatile unsigned int *clk_mem, *pwm_mem;
+extern volatile unsigned int *gpio_mem;
 
-static float frequency = 1000.0, dutycycle = 50.0;
+static int divisor = 8;
 /* 
 * ===  FUNCTION  =============================================================
-*         Name:  pwm_enable(int pin, bool enable)
+*         Name:  pwm_enable(int pwm, bool enable)
 *  Description:  enable or disable PWM pin
 * ============================================================================
 */
-int pwm_enable(int pin, _Bool enable)
+int pwm_enable(int pwm, _Bool enable)
 {
     int reg = 0;
     int shift = 0;
 
-    shift = PWM_ENABLE + pin*8;
+    shift = PWM_ENABLE + pwm*8;
     reg = *(pwm_mem + PWM_CTL);
     reg &= ~(1 << shift);
     reg |= (enable << shift);
@@ -32,21 +34,21 @@ int pwm_enable(int pin, _Bool enable)
 
 /* 
 * ===  FUNCTION  =============================================================
-*         Name:  setMode(int pin, int mode)
-*  Description:  set pin to MSMODE(normal) or PWMMODE(distributed)
-*g ============================================================================
+*         Name:  setMode(int pwm, int mode)
+*  Description:  set pwm to MSMODE(normal) or PWMMODE(distributed)
+* ============================================================================
 */
-int setMode(int pin, int mode)
+int setMode(int pwm, int mode)
 {
     int reg = 0;
     int shift = 0;
 
     if((mode != PWMMODE) && (mode != MSMODE)) {
         return ERRMODE;
-    } else if(pin > 1) {
+    } else if(pwm > 1) {
         return ERRMODE;
     } else {
-        shift = MSSHIFT + pin*8;
+        shift = MSSHIFT + pwm*8;
         reg = *(pwm_mem + PWM_CTL);
         reg &= ~(1 << shift);
         reg |= (mode << shift);
@@ -58,16 +60,16 @@ int setMode(int pin, int mode)
 
 /* 
 * ===  FUNCTION  =============================================================
-*         Name:  setPolarity(int pin, int pol)
+*         Name:  setPolarity(int pwm, int pol)
 *  Description:  set pin to specified polarity (0, normal, 1, inverted)
 * ============================================================================
 */
-int setPolarity(int pin, int pol)
+int setPolarity(int pwm, int pol)
 {
     int reg = 0;
     int shift = 0;
 
-    shift = POLARITY + pin*8;
+    shift = POLARITY + pwm*8;
     reg = *(pwm_mem + PWM_CTL);
     reg &= ~(1 << shift);
     reg |= (pol << shift);
@@ -78,78 +80,8 @@ int setPolarity(int pin, int pol)
 
 /* 
 * ===  FUNCTION  =============================================================
-*         Name:  *mapRegAddr
-*  Description:  map 4KB of physical memory into the calling process
-*
-* ============================================================================
-*/
-volatile unsigned int *mapRegAddr(unsigned int baseAddr)
-{
-    int mem_fd = 0;
-    void *regAddrMap = MAP_FAILED;
-
-    /* open /dev/mem.....need to run program as root i.e. use sudo or su */
-    if (!mem_fd) {
-        if ((mem_fd = open("/dev/mem", O_RDWR|O_SYNC) ) < 0) {
-            perror("can't open /dev/mem");
-            exit (1);
-        }
-    }
-
-    /* mmap IO */
-    regAddrMap = mmap(
-        NULL,
-        BLOCK_SIZE,
-        PROT_READ|PROT_WRITE|PROT_EXEC,
-        MAP_SHARED|MAP_LOCKED,
-        mem_fd,
-        baseAddr
-        );
-
-    if(close(mem_fd) < 0) {
-        perror("close /dev/mem");
-        exit(1);
-    }
-
-    if (regAddrMap == MAP_FAILED) {
-        perror("mmap error");
-        exit (1);
-    }
-    return (volatile unsigned int *)regAddrMap;
-}
-
-/* 
-* ===  FUNCTION  =============================================================
-*         Name:  configPWMPin(int gpio)
-*  Description:  set GPIO pin to PWM mode
-* ============================================================================
-*/
-#define FSEL_OFFSET  0
-#define ALT0         4    /* PWM for pin 12/13 */
-#define ALT5         2    /* PWM for pin 18/19 */
-int configPWMPin(int gpio)
-{
-    unsigned int offset = FSEL_OFFSET + (gpio/10);
-    int shift = (gpio%10)*3;
-    int reg;
-
-    reg = *(gpio_mem + offset);
-    reg &= ~(7 << shift);
-    if (gpio == 12 || gpio == 13) {
-        reg |= (ALT0 << shift);
-    }
-    else if (gpio == 18 || gpio == 19) {
-        reg |= (ALT5 << shift);
-    }
-
-    *(gpio_mem+offset) = reg;
-    return 0;
-}
-
-/* 
-* ===  FUNCTION  =============================================================
-*         Name:  setClock(_Bool init)
-*  Description:  sett PWM clock. when init, set also frequency and dutycycle
+*         Name:  setClock(int div)
+*  Description:  sett PWM clock.
 * ============================================================================
 */
 #define BCM_PASSWD  0x5A000000
@@ -157,15 +89,14 @@ int configPWMPin(int gpio)
 #define CLK_ENABLE  4
 #define CLK_KILL    5
 #define CLK_BUSY    7
-int setClock(_Bool init)
+int setClock(int div)
 {
-    int divisor = 75;
     int counts = 0;
 
     /* stop clock and waiting for busy flag doesn't work,
      * so kill clock  first. '5A' is CLK password */
     *(clk_mem + PWMCLK_CNTL) = BCM_PASSWD | (1 << CLK_KILL);
-    usleep(10);  
+    usleep(2);  
 
     // wait until busy flag is set 
     while ((*(clk_mem + PWMCLK_CNTL)) & (1<<CLK_BUSY)) { }   
@@ -176,18 +107,6 @@ int setClock(_Bool init)
     /* source=osc and enable clock */
     *(clk_mem + PWMCLK_CNTL) = BCM_PASSWD | (1<<CLK_ENABLE) | (1<<CLK_OSC);
 
-    if(init) {
-        *(pwm_mem + PWM_CTL) = 0;
-        usleep(10); /* prevent from PWM module crashes */
-        counts = 19200000.0/75.0/frequency; /* default set to 1000Hz */
-        *(pwm_mem + PWM_RNG1) = counts;
-        *(pwm_mem + PWM_RNG2) = counts;
-        usleep(10);
-
-        *(pwm_mem + PWM_DAT1) = counts * dutycycle/100.0; /* default duty cycle to 50% */
-        *(pwm_mem + PWM_DAT2) = counts * dutycycle/100.0;
-    }
-
     return 0;
 }
 
@@ -197,57 +116,55 @@ int setClock(_Bool init)
 *  Description:  set PWM pin frequency between 0.1Hz and 19.2MHz
 * ============================================================================
 */
-int setFrequency(int pin, float freq)
+int setFrequency(int pwm, float freq)
 {
     int counts, bits;
+	float f;
 
     /* make sure the frequency is valid */
-    if (freq< 0 || freq> 19200000.0f)
+    if (freq < 0 || freq > 19200000.0f)
         return ERRFREQ;
 
-    counts = 19200000.0/75.0/freq;
-    bits = counts * dutycycle/100.0;
-    if (pin == 0) {
-        *(pwm_mem + PWM_RNG1) = counts;
-        *(pwm_mem + PWM_DAT1) = bits;
-    } else if (pin == 1) {
-        *(pwm_mem + PWM_RNG2) = counts;
-        *(pwm_mem + PWM_DAT2) = bits;
-    } else {
-        return ERRFREQ;
-    }
+    if (pwm < 0 || pwm > 1)
+        return ERRPIN;
 
-    frequency = freq;
-    usleep(10);
+    counts = *(pwm_mem + PWM_RNG(pwm));
+    bits = *(pwm_mem + PWM_DAT(pwm));
+
+	if (counts)
+		f = (float)bits/counts;
+	else
+		f = 0;
+
+    counts = 19200000.0/divisor/freq;
+    bits = counts * f;
+    *(pwm_mem + PWM_RNG(pwm)) = counts;
+    *(pwm_mem + PWM_DAT(pwm)) = bits;
+
     return 0;
 }
 
 /* 
 * ===  FUNCTION  =============================================================
-*         Name:  setDutyCycle(int pin, float dutycycle)
+*         Name:  setDutyCycle(int pwm, float dutycycle)
 *  Description:  set duty cycle from 0% to 100%
 * ============================================================================
 */
-int setDutyCycle(int pin, float duty)
+int setDutyCycle(int pwm, float duty)
 {
     int counts, bits;
 
     if((duty< 0 || duty> 100.0))
         return ERRDUTY;
 
-    counts = 19200000.0/75.0/frequency;
+    if (pwm < 0 || pwm > 1)
+        return ERRPIN;
+
+    counts = *(pwm_mem + PWM_RNG(pwm));
+
     bits = counts * duty/100.0;
-    if (pin == 0) {
-        *(pwm_mem + PWM_RNG1) = counts;
-        *(pwm_mem + PWM_DAT1) = bits;
-    } else if (pin == 1) {
-        *(pwm_mem + PWM_RNG2) = counts;
-        *(pwm_mem + PWM_DAT2) = bits;
-    } else {
-        return ERRDUTY;
-    }
-    dutycycle = duty;
-    usleep(10);
+    *(pwm_mem + PWM_DAT(pwm)) = bits;
+
     return 0;
 }
 
@@ -261,27 +178,16 @@ void pwm_stop()
 {
     /* put the PWM peripheral registers in their original state */
     *(pwm_mem + PWM_CTL) = 0;
-    *(pwm_mem + PWM_RNG1) = 0x20;
-    *(pwm_mem + PWM_DAT1) = 0;
-    *(pwm_mem + PWM_RNG2) = 0x20;
-    *(pwm_mem + PWM_DAT2) = 0;
+    *(pwm_mem + PWM_RNG(0)) = 0x20;
+    *(pwm_mem + PWM_DAT(0)) = 0;
+    *(pwm_mem + PWM_RNG(1)) = 0x20;
+    *(pwm_mem + PWM_DAT(1)) = 0;
 
     if(munmap((void*)pwm_mem, BLOCK_SIZE) < 0){
         perror("munmap (pwm)");
         exit(1);
     }
-    /* put the PWM Clock in their original state */
-    *(clk_mem + PWMCLK_CNTL) = BCM_PASSWD | (1 << CLK_KILL);
-    usleep(10);
-
-    while((*(clk_mem + PWMCLK_CNTL)) & (1<<CLK_BUSY)) { }
-
-    *(clk_mem + PWMCLK_DIV) = BCM_PASSWD;  /* reset divisor */
-    usleep(10);
-
-    /* source=osc and enable clock */
-    *(clk_mem + PWMCLK_CNTL) = BCM_PASSWD | (1<<CLK_ENABLE) | (1<<CLK_OSC);
-    usleep(10);
+    setClock(0);
 
     if(munmap((void*)clk_mem, BLOCK_SIZE) < 0){
         perror("munmap (clk)");
@@ -289,13 +195,14 @@ void pwm_stop()
     }
 
     /* reset GPIO18 and GPIO19 to GPIO INPUT */
-    *(gpio_mem+FSEL_OFFSET) &= ~(7 << 24);
-    *(gpio_mem+FSEL_OFFSET) &= ~(7 << 27);
+    *(gpio_mem+FSEL_OFFSET+1) &= ~(7 << 24);
+    *(gpio_mem+FSEL_OFFSET+1) &= ~(7 << 27);
 
     if(munmap((void*)gpio_mem, BLOCK_SIZE) < 0){
         perror("munmap (gpio)");
         exit(1);
     }
+    gpio_mem = NULL;
 }
 
 /* 
@@ -305,16 +212,18 @@ void pwm_stop()
 *                without output signal
 * ============================================================================
 */
-void pwm_init()
+void pwm_init(int div)
 {
     pwm_mem  = mapRegAddr(BCM2709_PERI_BASE_DEFAULT + PWM_BASE_OFFSET);
     clk_mem  = mapRegAddr(BCM2709_PERI_BASE_DEFAULT + CLK_BASE_OFFSET);
-    gpio_mem = mapRegAddr(BCM2709_PERI_BASE_DEFAULT + GPIO_BASE_OFFSET);
+    if (gpio_mem == NULL)
+        gpio_mem = mapRegAddr(BCM2709_PERI_BASE_DEFAULT + GPIO_BASE_OFFSET);
 
-    configPWMPin(18); //configure GPIO18 to ALT5 (PWM output)
-    configPWMPin(19); //configure GPIO19 to ALT5 (PWM output)
+    configPinAlt(18, ALT5); //configure GPIO18 to ALT5 (PWM output)
+    configPinAlt(19, ALT5); //configure GPIO19 to ALT5 (PWM output)
 
-    setClock(1);
+    divisor = div;
+    setClock(div);
     setMode(0, MSMODE);
     setMode(1, MSMODE);
 }
